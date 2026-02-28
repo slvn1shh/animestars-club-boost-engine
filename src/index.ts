@@ -5,14 +5,36 @@ import { DateTime } from "luxon";
 import { login } from "./auth";
 
 const CLUB_ID = process.env.CLUB_ID || "52";
-let USER_HASH = process.env.USER_HASH || ""; // required or via login
-let COOKIE = process.env.COOKIE || ""; // full cookie string for session or via login
-const USERNAME = process.env.USERNAME || "";
-const PASSWORD = process.env.PASSWORD || "";
+
+function normalizeEnvValue(value?: string): string {
+    const raw = (value || "").trim();
+    if (!raw) return "";
+    if ((raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('"') && raw.endsWith('"'))) {
+        return raw.slice(1, -1).trim();
+    }
+    return raw;
+}
+
+function isPlaceholderValue(value: string): boolean {
+    if (!value) return true;
+    const lower = value.toLowerCase();
+    return (
+        lower.includes("placeholder") ||
+        lower.includes("your_") ||
+        lower.includes("changeme") ||
+        lower.includes("example")
+    );
+}
+
+let USER_HASH = normalizeEnvValue(process.env.USER_HASH); // required or via login
+let COOKIE = normalizeEnvValue(process.env.COOKIE); // full cookie string for session or via login
+const USERNAME = normalizeEnvValue(process.env.LOGIN);
+const PASSWORD = normalizeEnvValue(process.env.PASSWORD);
 
 const START_HOUR = 21; // 21:01 in UTC+3
 const START_MINUTE = 1;
 const START_SECOND = 2; // offset to allow 600 boost_count skipping
+const START_GRACE_MINUTES = 10;
 const START_ZONE = "UTC+3";
 
 function msUntilNextStartUtcPlus3(): number {
@@ -22,6 +44,13 @@ function msUntilNextStartUtcPlus3(): number {
         target = target.plus({ days: 1 });
     }
     return target.toMillis() - now.toMillis();
+}
+
+function canStartNowInManualGraceWindowUtcPlus3(): boolean {
+    const now = DateTime.now().setZone(START_ZONE);
+    const todayStart = now.set({ hour: START_HOUR, minute: START_MINUTE, second: START_SECOND, millisecond: 0 });
+    const graceEnd = todayStart.plus({ minutes: START_GRACE_MINUTES });
+    return now >= todayStart && now <= graceEnd;
 }
 
 async function sleep(ms: number) {
@@ -52,7 +81,7 @@ async function fetchInitialCard(): Promise<{ cardId: string; clubId: string } | 
     }
     const btn = extractButton(res.data);
     if (!btn?.cardId || !btn?.clubId) return null;
-    return { cardId: btn.cardId!, clubId: btn.clubId! };
+    return { cardId: btn.cardId, clubId: btn.clubId };
 }
 
 interface RefreshResponse {
@@ -101,7 +130,7 @@ async function refreshCard(cardId: string): Promise<{
         return { donateReady: false, boostCount: null, reason: "parse_error" };
     }
 
-    if (data && data?.error === "Too many requests") {
+    if (data?.error === "Too many requests") {
         return { donateReady: false, boostCount: parseBoostCount(data.boost_count), reason: "rate_limited" };
     }
 
@@ -110,7 +139,7 @@ async function refreshCard(cardId: string): Promise<{
     const donateReady = btn?.text === "Пожертвовать карту" || !!data?.boost_no;
     const nextCardId = btn?.cardId || cardId;
     const boostCount = parseBoostCount(data?.boost_count);
-    return { nextCardId, donateReady: donateReady, boostCount, reason: "donate_ready" };
+    return { nextCardId, donateReady, boostCount, reason: "donate_ready" };
 }
 
 async function donateCard(cardId: string): Promise<{
@@ -147,15 +176,16 @@ async function donateCard(cardId: string): Promise<{
 async function runOnceCycle() {
     if (USERNAME && PASSWORD) {
         const auth = await login(USERNAME, PASSWORD);
-        if (auth?.userHash) {
+        if (auth) {
             USER_HASH = auth.userHash;
-            // axios-cookiejar-support handles COOKIE automatically via jar
-            COOKIE = "";
+            COOKIE = auth.cookie;
         }
     }
 
-    if (!USER_HASH && !COOKIE) {
-        console.error("USER_HASH and COOKIE env variables (or USERNAME/PASSWORD) are required.");
+    const hasManualHash = !!USER_HASH && !isPlaceholderValue(USER_HASH);
+    const hasManualCookie = !!COOKIE && !isPlaceholderValue(COOKIE);
+    if (!hasManualHash && !hasManualCookie) {
+        console.error("USER_HASH and COOKIE are missing (or still placeholder values).");
         return;
     }
 
@@ -176,13 +206,14 @@ async function runOnceCycle() {
         let donateReady = false;
         let boostCount: number | null = null;
         let foundZeroOnce = false;
+        let sleepMs = undefined;
 
         while (!donateReady) {
             const r = await refreshCard(currentCardId);
             boostCount = r.boostCount;
 
             if (boostCount !== null && foundZeroOnce) {
-                console.log(`[refresh] boost_count=${boostCount}; reason=${r?.reason}`);
+                console.log(`[refresh] boost_count=${boostCount}; reason=${r.reason}`);
                 if (boostCount >= 600) {
                     console.log("Reached boost_count >= 600. Stopping.");
                     return;
@@ -197,20 +228,21 @@ async function runOnceCycle() {
                 donateReady = true;
                 break;
             }
-            if (r?.reason === "rate_limited") {
-                const ms = Math.floor(Math.random() * 2000) + 1000;
+            if (r.reason === "rate_limited") {
+                const ms = Math.floor(Math.random() * 111) + (sleepMs ?? 0);
                 console.log(`[refresh] rate limited, retrying in ${ms}ms`);
                 await sleep(ms);
                 continue;
             }
-            if (r?.reason === "parse_error") {
+            if (r.reason === "parse_error") {
                 console.log(`[refresh] parse error, retrying in 10.5s`);
-                await sleep(10777 + Math.random() * 2000);
+                await sleep(10777 + Math.random() * 10.111);
                 continue;
             }
 
             // rate-limited or not ready yet; sleep a bit
             // human-like randomization: occasionally wait much longer
+            sleepMs = sleepMs ?? 111 + 111;
             const baseDelay = Math.random() < 0.05 ? 2000 + Math.random() * 3000 : 150 + Math.random() * 350;
             await sleep(baseDelay);
         }
@@ -258,8 +290,15 @@ async function runOnceCycle() {
 }
 
 async function main() {
+    let isFirstLoop = true;
+
     while (true) {
-        const waitMs = msUntilNextStartUtcPlus3();
+        let waitMs = msUntilNextStartUtcPlus3();
+
+        if (isFirstLoop && canStartNowInManualGraceWindowUtcPlus3()) {
+            waitMs = 0;
+        }
+
         if (waitMs > 0) {
             const secs = Math.round(waitMs / 600);
             console.log(`Waiting ${secs} sec until 21:01 (UTC+3) start...`);
@@ -272,6 +311,8 @@ async function main() {
         } catch (e) {
             console.error("Cycle error:", e);
         }
+
+        isFirstLoop = false;
 
         // After finishing (reaching 600), schedule next day
         const toNext = msUntilNextStartUtcPlus3();
