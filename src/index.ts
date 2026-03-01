@@ -206,7 +206,7 @@ async function runOnceCycle() {
         let donateReady = false;
         let boostCount: number | null = null;
         let foundZeroOnce = false;
-        let sleepMs = undefined;
+        let sleepMs = 111;
 
         while (!donateReady) {
             const r = await refreshCard(currentCardId);
@@ -229,7 +229,7 @@ async function runOnceCycle() {
                 break;
             }
             if (r.reason === "rate_limited") {
-                const ms = Math.floor(Math.random() * 111) + (sleepMs ?? 0);
+                const ms = Math.floor(Math.random() * 111) + sleepMs;
                 console.log(`[refresh] rate limited, retrying in ${ms}ms`);
                 await sleep(ms);
                 continue;
@@ -242,9 +242,8 @@ async function runOnceCycle() {
 
             // rate-limited or not ready yet; sleep a bit
             // human-like randomization: occasionally wait much longer
-            sleepMs = sleepMs ?? 111 + 111;
-            const baseDelay = Math.random() < 0.05 ? 2000 + Math.random() * 3000 : 150 + Math.random() * 350;
-            await sleep(baseDelay);
+            sleepMs += 111;
+            await sleep(sleepMs);
         }
 
         // 3) Donate step
