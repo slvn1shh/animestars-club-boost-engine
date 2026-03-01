@@ -294,7 +294,7 @@ async function main() {
     while (true) {
         let waitMs = msUntilNextStartUtcPlus3();
 
-        if (isFirstLoop && canStartNowInManualGraceWindowUtcPlus3()) {
+        if ((isFirstLoop && canStartNowInManualGraceWindowUtcPlus3()) || !!process.env.NO_WAIT) {
             waitMs = 0;
         }
 
