@@ -26,3 +26,7 @@ You can put this folder anywhere, or create an alias (shortcut) to `run_boost.sh
 ```bash
 bun src/index.ts
 ```
+
+```bash
+bun src/bossInvasion.ts
+```
